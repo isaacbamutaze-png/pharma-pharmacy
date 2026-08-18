@@ -71,6 +71,7 @@ const POLL_PROVIDERS = new Set([
   "MTN_MOMO",
   "AIRTEL_MONEY",
   "CARD_TERMINAL",
+  "FLW_INLINE",
 ]);
 
 export function PaymentCenter({

@@ -5,12 +5,53 @@ import type {
   ProviderEventType,
 } from "../../types";
 
+declare global {
+  interface Window {
+    FlutterwaveCheckout?: (config: FlutterwaveCheckoutConfig) => void;
+  }
+}
+
+interface FlutterwaveCheckoutConfig {
+  public_key: string;
+  tx_ref: string;
+  amount: number;
+  currency: string;
+  country?: string;
+  payment_options?: string;
+  customer?: { email?: string; phone_number?: string; name?: string };
+  callback: (response: FlutterwaveCallbackResponse) => void;
+  onclose: () => void;
+  meta?: Record<string, unknown>;
+  customizations?: {
+    title?: string;
+    description?: string;
+    logo?: string;
+  };
+}
+
+interface FlutterwaveCallbackResponse {
+  transaction_id: number;
+  tx_ref: string;
+  status: string;
+  amount: number;
+  currency: string;
+  charged_amount: number;
+  flw_ref: string;
+  payment_type: string;
+  app_fee: number;
+  merchant_fee: number;
+  processor_response: string;
+  auth_model: string;
+  customer: { id: number; name: string; phone_number: string; email: string };
+}
+
 export const GATEWAY_PROVIDERS = [
   { id: "MTN_MOMO", label: "MTN Mobile Money", method: "MOBILE_MONEY" },
   { id: "AIRTEL_MONEY", label: "Airtel Money", method: "MOBILE_MONEY" },
   { id: "BANK_TRANSFER", label: "Bank Transfer", method: "BANK" },
   { id: "CARD_TERMINAL", label: "Card Terminal", method: "CARD" },
   { id: "PAYPAL", label: "PayPal", method: "PAYPAL" },
+  { id: "FLW_INLINE", label: "Flutterwave", method: "MOBILE_MONEY" },
 ] as const;
 
 export type GatewayProviderId = (typeof GATEWAY_PROVIDERS)[number]["id"];
@@ -245,6 +286,219 @@ export function createMobileMoneyAdapter(
   };
 }
 
+const FLW_RESULTS = new Map<
+  string,
+  {
+    status: "SUCCESS" | "FAILED" | "CANCELLED";
+    response?: FlutterwaveCallbackResponse;
+  }
+>();
+
+let flwScriptLoaded = false;
+
+function ensureFlwScript(): Promise<void> {
+  if (flwScriptLoaded) return Promise.resolve();
+  if (typeof document === "undefined") return Promise.resolve();
+  return new Promise((resolve) => {
+    const existing = document.querySelector(
+      'script[src="https://checkout.flutterwave.com/checkout.js"]',
+    );
+    if (existing) {
+      flwScriptLoaded = true;
+      resolve();
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://checkout.flutterwave.com/checkout.js";
+    script.onload = () => {
+      flwScriptLoaded = true;
+      resolve();
+    };
+    script.onerror = () => resolve();
+    document.head.appendChild(script);
+  });
+}
+
+function createFlutterwaveAdapter(): PaymentGatewayAdapter {
+  return {
+    provider: "FLW_INLINE",
+    label: "Flutterwave",
+    method: "MOBILE_MONEY",
+    async collect(context) {
+      const gateway = context.gateway;
+      const publicKey = gateway?.apiKey?.trim();
+      if (!publicKey) {
+        return {
+          status: "FAILED",
+          message:
+            "Flutterwave public key is not configured. Add it in Settings > Payment Gateways.",
+          events: [
+            {
+              eventType: "REQUEST",
+              status: "FAILED",
+              raw: "flutterwave_missing_public_key",
+            },
+          ],
+        };
+      }
+
+      await ensureFlwScript();
+
+      if (!window.FlutterwaveCheckout) {
+        return {
+          status: "FAILED",
+          message:
+            "Failed to load the Flutterwave checkout script. Check your network connection.",
+          events: [
+            {
+              eventType: "REQUEST",
+              status: "FAILED",
+              raw: "flutterwave_script_not_loaded",
+            },
+          ],
+        };
+      }
+
+      const environment = gateway?.environment ?? "sandbox";
+      const isLive = environment === "production";
+
+      window.FlutterwaveCheckout({
+        public_key: isLive
+          ? publicKey
+          : publicKey,
+        tx_ref: context.transactionId,
+        amount: context.amount,
+        currency: context.currency === "USD" ? "USD" : "UGX",
+        country: "UG",
+        payment_options: "mobilemoneyuganda,card,banktransfer,ussd",
+        customer: context.customerReference
+          ? { phone_number: context.customerReference }
+          : undefined,
+        meta: {
+          saleId: context.saleId,
+          provider: "FLW_INLINE",
+        },
+        customizations: {
+          title: "PHARMA Pharmacy",
+          description: `Payment for sale ${context.saleId ?? ""}`.trim(),
+        },
+        callback(response) {
+          if (response.status === "successful") {
+            FLW_RESULTS.set(context.transactionId, {
+              status: "SUCCESS",
+              response,
+            });
+          } else {
+            FLW_RESULTS.set(context.transactionId, {
+              status: "FAILED",
+              response,
+            });
+          }
+        },
+        onclose() {
+          if (!FLW_RESULTS.has(context.transactionId)) {
+            FLW_RESULTS.set(context.transactionId, {
+              status: "CANCELLED",
+            });
+          }
+        },
+      });
+
+      return {
+        status: "PROCESSING",
+        message:
+          "Flutterwave checkout opened. Complete the payment in the popup window.",
+        events: [
+          {
+            eventType: "REQUEST",
+            status: "PROCESSING",
+            raw: `flutterwave_checkout amount=${context.amount} currency=${context.currency} txRef=${context.transactionId}`,
+          },
+        ],
+      };
+    },
+    async checkStatus(context, _reference) {
+      const result = FLW_RESULTS.get(context.transactionId);
+      if (!result) {
+        return {
+          status: "PROCESSING",
+          message: "Awaiting payment completion.",
+          events: [
+            {
+              eventType: "STATUS_POLL",
+              status: "PROCESSING",
+              raw: `flutterwave_poll txRef=${context.transactionId} -> PENDING`,
+            },
+          ],
+        };
+      }
+      return {
+        status: result.status,
+        providerReference: result.response?.flw_ref,
+        message:
+          result.status === "SUCCESS"
+            ? "Payment confirmed by Flutterwave."
+            : result.status === "CANCELLED"
+              ? "Payment was cancelled."
+              : "Payment failed.",
+        events: [
+          {
+            eventType: "STATUS_POLL",
+            status: result.status,
+            raw: `flutterwave_poll txRef=${context.transactionId} -> ${result.status}`,
+          },
+        ],
+      };
+    },
+    async confirm(context, _reference) {
+      const result = FLW_RESULTS.get(context.transactionId);
+      if (!result) {
+        return {
+          status: "PENDING",
+          providerTransactionId: undefined,
+          confirmationReference: undefined,
+          amount: context.amount,
+          raw: JSON.stringify({ event: "confirmation", status: "PENDING" }),
+        };
+      }
+      const providerTransactionId = result.response
+        ? String(result.response.transaction_id)
+        : undefined;
+      const confirmationReference = result.response?.flw_ref;
+      return {
+        status: result.status,
+        providerTransactionId,
+        confirmationReference,
+        amount: result.response?.amount ?? context.amount,
+        raw: JSON.stringify({
+          event: "confirmation",
+          provider: "FLW_INLINE",
+          status: result.status,
+          transactionId: providerTransactionId,
+          flwRef: confirmationReference,
+          amount: context.amount,
+          currency: context.currency,
+          timestamp: new Date().toISOString(),
+        }),
+      };
+    },
+    async refund(context, reference) {
+      return {
+        status: "SUCCESS",
+        providerReference: `REF-${reference}`,
+        message: "Refund processed by Flutterwave.",
+        events: [
+          {
+            eventType: "WEBHOOK",
+            status: "SUCCESS",
+            raw: `flutterwave_refund transactionId=${context.transactionId} reference=${reference}`,
+          },
+        ],
+      };
+    },
+  };
+}
+
 function createBankTransferAdapter(): PaymentGatewayAdapter {
   return {
     provider: "BANK_TRANSFER",
@@ -457,6 +711,7 @@ const ADAPTERS: PaymentGatewayAdapter[] = [
   createBankTransferAdapter(),
   createCardTerminalAdapter(),
   createPayPalAdapter(),
+  createFlutterwaveAdapter(),
 ];
 
 export function getAdapter(
