@@ -10,6 +10,7 @@ import {
   User as UserIcon,
 } from "lucide-react";
 import { pharmaDb } from "../../db";
+import { loadPaymentsServerConfig } from "../../lib/payments/remote";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Badge } from "../../components/ui/Badge";
@@ -808,7 +809,7 @@ function WelcomeHint({
         <Badge tone={online && llmConfigured ? "green" : "slate"}>
           {online && llmConfigured
             ? `Online LLM${model ? ` · ${model}` : ""}`
-            : "Offline engine (no API key or offline)"}
+            : "Offline engine (works without internet)"}
         </Badge>
         {llmConfigured && !online && (
           <span className="ml-2 text-xs text-slate-500">
@@ -895,7 +896,8 @@ export function AiAssistantPage() {
     () => (ctx ? buildBriefing(ctx) : []),
     [ctx],
   );
-  const llmConfigured = Boolean(settings?.apiKey?.trim());
+  const serverConfig = useLiveQuery(() => loadPaymentsServerConfig(), []);
+  const llmConfigured = Boolean(settings?.apiKey?.trim()) || Boolean(serverConfig);
 
   const send = async (raw?: string) => {
     const question = (raw ?? input).trim();

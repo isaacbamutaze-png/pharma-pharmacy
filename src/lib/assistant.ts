@@ -1,6 +1,7 @@
 import { pharmaDb } from "../db";
 import { formatMoney, formatDate, formatDateTime, now } from "./utils";
 import { round2 } from "./sales";
+import { loadPaymentsServerConfig, remote } from "./payments/remote";
 import { todayISO, addDaysISO, daysUntil, formatISO } from "./stock";
 import { PAYMENT_METHODS, emptyMethodTotals } from "./payments/constants";
 import { buildReorderSuggestions } from "./ai/inventory";
@@ -251,6 +252,11 @@ export async function askAssistant(
   ctx: AssistantContext,
   history: ChatTurn[],
 ): Promise<AssistantResponse> {
+  // The UI appends the new question to the history; drop it so it is not sent twice.
+  const last = history[history.length - 1];
+  if (last && last.role === "user" && last.content === question) {
+    history = history.slice(0, -1);
+  }
   const offline = (): AssistantResponse => {
     const answer = answerQuestion(question, ctx);
     return {
@@ -261,17 +267,33 @@ export async function askAssistant(
     };
   };
 
+  // Offline engine is the always-on baseline: it runs on-device from local data.
+  const connected = typeof navigator === "undefined" || navigator.onLine;
+  if (!connected) return offline();
+
+  // 1) Preferred online path: the PHARMA server holds the AI key (never in the app).
+  const server = await loadPaymentsServerConfig();
+  if (server) {
+    try {
+      const { text } = await remote.assistant(server, {
+        question,
+        snapshot: buildSummary(ctx),
+        history: history.slice(-8),
+      });
+      if (text.trim()) return { text: text.trim(), source: "LLM" };
+    } catch {
+      /* AI not configured on server, or unreachable: fall through */
+    }
+  }
+
+  // 2) Legacy: OpenAI-compatible endpoint configured directly in Settings.
   const settings = await loadAssistantSettings();
-  const online =
-    settings.apiKey.trim().length > 0 &&
-    typeof navigator !== "undefined" &&
-    navigator.onLine;
-  if (online) {
+  if (settings.apiKey.trim().length > 0) {
     try {
       const text = await callLLM(question, ctx, history, settings);
       return { text, source: "LLM" };
     } catch {
-      return offline();
+      /* fall through */
     }
   }
   return offline();

@@ -1,12 +1,14 @@
 import { pharmaDb } from "../db";
 import { uid, now } from "./utils";
 import { round2 } from "./sales";
-import { nextPaymentReference } from "./payments/service";
+import { getGatewayConfig, nextPaymentReference } from "./payments/service";
 import { getAdapter, isGatewayMethod, providerForMethod } from "./payments/gateway";
 import type {
   PaymentMethod,
+  PaymentTransaction,
   Refund,
   RefundItem,
+  ProviderEventType,
   RefundReason,
 } from "../types";
 
@@ -45,7 +47,11 @@ export async function createRefund(
     }
   }
 
-  return pharmaDb.transaction(
+  // The provider refund is a network call. IndexedDB transactions cannot stay
+  // open across real network awaits, so it runs after the transaction commits.
+  const holder: { post?: PostRefund } = {};
+
+  const created = await pharmaDb.transaction(
     "rw",
     [
       pharmaDb.sales,
@@ -229,55 +235,20 @@ export async function createRefund(
           )
           .first();
 
-        if (originalTx?.provider) {
-          const adapter = getAdapter(originalTx.provider);
-          if (adapter) {
-            const provider = providerForMethod(
-              input.refundMethod,
-              originalTx.provider,
-            );
-            refundProvider = provider ?? originalTx.provider;
-            try {
-              const result = await adapter.refund(
-                {
-                  transactionId: refundTxId,
-                  saleId: sale.id,
-                  provider: refundProvider,
-                  method: input.refundMethod,
-                  amount: refundAmount,
-                  currency: "UGX",
-                  customerReference: originalTx.customerReference,
-                  gateway: undefined,
-                },
-                originalTx.providerReference ?? "",
-              );
-              refundProviderRef = result.providerReference;
-              refundStatus =
-                result.status === "SUCCESS"
-                  ? "SUCCESS"
-                  : result.status === "PENDING"
-                    ? "PENDING"
-                    : "FAILED";
-              if (refundStatus === "FAILED") {
-                refundFailureReason = result.message;
-              }
-              for (const evt of result.events) {
-                await pharmaDb.paymentProviderEvents.add({
-                  id: uid(),
-                  transactionId: refundTxId,
-                  saleId: sale.id,
-                  provider: refundProvider,
-                  eventType: evt.eventType,
-                  status: evt.status,
-                  raw: evt.raw,
-                  receivedAt: timestamp,
-                });
-              }
-            } catch {
-              refundStatus = "FAILED";
-              refundFailureReason = "Gateway refund call failed.";
-            }
-          }
+        if (originalTx?.provider && getAdapter(originalTx.provider)) {
+          const providerId: string =
+            providerForMethod(input.refundMethod, originalTx.provider) ??
+            originalTx.provider;
+          refundProvider = providerId;
+          refundStatus = "PENDING";
+          holder.post = {
+            refundTxId,
+            saleId: sale.id,
+            provider: providerId,
+            method: input.refundMethod,
+            amount: refundAmount,
+            originalTx,
+          };
         }
       }
 
@@ -322,6 +293,76 @@ export async function createRefund(
       return refund;
     },
   );
+
+  if (holder.post) await sendProviderRefund(holder.post);
+  return created;
+}
+
+interface PostRefund {
+  refundTxId: string;
+  saleId: string;
+  provider: string;
+  method: PaymentMethod;
+  amount: number;
+  originalTx: PaymentTransaction;
+}
+
+/** Sends the refund to the provider and records what the provider answered. */
+async function sendProviderRefund(post: PostRefund): Promise<void> {
+  const adapter = getAdapter(post.provider);
+  let status: "SUCCESS" | "FAILED" | "PENDING" = "FAILED";
+  let providerRef: string | undefined;
+  let failure: string | undefined = "Gateway refund call failed.";
+  const events: Array<{ eventType: ProviderEventType; status: string; raw: string }> = [];
+  try {
+    if (!adapter) throw new Error("No gateway adapter.");
+    const gateway = await getGatewayConfig(post.provider);
+    const result = await adapter.refund(
+      {
+        transactionId: post.refundTxId,
+        originalTransactionId: post.originalTx.id,
+        saleId: post.saleId,
+        provider: post.provider,
+        method: post.method,
+        amount: post.amount,
+        currency: post.originalTx.currency,
+        customerReference: post.originalTx.customerReference,
+        gateway,
+      },
+      post.originalTx.providerReference ?? "",
+    );
+    providerRef = result.providerReference;
+    status =
+      result.status === "SUCCESS"
+        ? "SUCCESS"
+        : result.status === "PENDING"
+          ? "PENDING"
+          : "FAILED";
+    failure = status === "FAILED" ? result.message : undefined;
+    events.push(...result.events);
+  } catch {
+    /* keep FAILED defaults */
+  }
+  const timestamp = now();
+  await pharmaDb.paymentTransactions.update(post.refundTxId, {
+    status,
+    providerReference: providerRef,
+    completedAt: status === "SUCCESS" ? timestamp : undefined,
+    failureReason: failure,
+    updatedAt: timestamp,
+  });
+  for (const evt of events) {
+    await pharmaDb.paymentProviderEvents.add({
+      id: uid(),
+      transactionId: post.refundTxId,
+      saleId: post.saleId,
+      provider: post.provider,
+      eventType: evt.eventType,
+      status: evt.status,
+      raw: evt.raw,
+      receivedAt: timestamp,
+    });
+  }
 }
 
 export function refundableForItem(

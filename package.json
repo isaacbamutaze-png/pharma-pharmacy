@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "electron": "electron .",
     "dist": "tsc -b && vite build && electron-builder --win",
-    "dist:portable": "tsc -b && vite build && electron-builder --win portable"
+    "dist:portable": "tsc -b && vite build && electron-builder --win portable",
+    "test:server": "node server/test/run.mjs",
+    "server": "node server/index.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^5.7.8",

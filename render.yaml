@@ -1,0 +1,31 @@
+# One-click deploy of the PHARMA payments + AI server on Render (free plan works).
+services:
+  - type: web
+    name: pharma-payments
+    runtime: node
+    rootDir: server
+    buildCommand: "echo no build step"
+    startCommand: node index.mjs
+    healthCheckPath: /health
+    plan: free
+    envVars:
+      - key: PHARMA_API_KEY
+        generateValue: true
+      - key: FLW_SECRET_HASH
+        generateValue: true
+      - key: FLW_SECRET_KEY
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://rinapharma.netlify.app,https://localhost,capacitor://localhost
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: PAYPAL_UGX_PER_USD
+        value: "3700"
+      - key: ANTHROPIC_API_KEY
+        sync: false
