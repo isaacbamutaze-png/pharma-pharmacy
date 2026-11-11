@@ -1,6 +1,7 @@
 import { pharmaDb } from "../../db";
 import { uid, now } from "../utils";
 import { round2 } from "../sales";
+import { loadPaymentsServerConfig } from "./remote";
 import {
   getAdapter,
   isGatewayMethod,
@@ -181,6 +182,8 @@ export interface InitiatePaymentResult {
   providerReference?: string;
   paymentReference?: string;
   message?: string;
+  /** Secure page the customer must open (card / bank / PayPal). */
+  actionUrl?: string;
 }
 
 export async function initiatePayment(
@@ -255,6 +258,7 @@ export async function initiatePayment(
     providerReference: result.providerReference,
     paymentReference,
     message: result.message,
+    actionUrl: result.actionUrl,
   };
 }
 
@@ -292,7 +296,10 @@ export async function receiveProviderConfirmation(
   if (!tx) throw new Error("Payment transaction not found.");
 
   const existing = await getConfirmationsForTransaction(transactionId);
-  if (isFinalPaymentStatus(tx.status) && existing.length > 0) {
+  // TIMEOUT / EXPIRED are not conclusive: the customer may still approve late,
+  // so they are re-checked with the provider instead of being trusted forever.
+  const recheckable = tx.status === "TIMEOUT" || tx.status === "EXPIRED";
+  if (isFinalPaymentStatus(tx.status) && existing.length > 0 && !recheckable) {
     const latest = existing[existing.length - 1];
     return {
       transactionId,
@@ -335,15 +342,17 @@ export async function receiveProviderConfirmation(
       updatedAt: timestamp,
     };
     await pharmaDb.paymentTransactions.update(transactionId, updates);
-    await recordEvent({
-      transactionId,
-      saleId: tx.saleId,
-      provider: tx.provider,
-      eventType: "STATUS_POLL",
-      status: result.status,
-      raw: result.raw,
-      receivedAt: timestamp,
-    });
+    if (status !== tx.status) {
+      await recordEvent({
+        transactionId,
+        saleId: tx.saleId,
+        provider: tx.provider,
+        eventType: "STATUS_POLL",
+        status: result.status,
+        raw: result.raw,
+        receivedAt: timestamp,
+      });
+    }
     return {
       transactionId,
       transactionStatus: status,
@@ -390,7 +399,7 @@ export async function receiveProviderConfirmation(
     updates.failureReason = undefined;
   } else {
     updates.completedAt = timestamp;
-    updates.failureReason = result.raw;
+    updates.failureReason = failureText(result.raw, status);
   }
   await pharmaDb.paymentTransactions.update(transactionId, updates);
 
@@ -410,6 +419,44 @@ export async function receiveProviderConfirmation(
     transactionStatus: confirmed ? "SUCCESS" : status,
     verified,
   };
+}
+
+function failureText(raw: string, status: PaymentStatus): string {
+  try {
+    const parsed = JSON.parse(raw) as { message?: string; note?: string };
+    if (parsed.message) return parsed.message;
+    if (parsed.note === "unknown_to_server")
+      return "The payment never reached the provider, so no money was taken.";
+  } catch {
+    /* not JSON */
+  }
+  return `Payment ${status.toLowerCase()}.`;
+}
+
+/**
+ * Marks a payment the cashier stopped waiting for as EXPIRED.
+ * A late approval is still picked up if someone re-checks the payment later
+ * (Payments page > re-check), because the server keeps asking the provider.
+ */
+export async function expirePayment(transactionId: string): Promise<void> {
+  const tx = await pharmaDb.paymentTransactions.get(transactionId);
+  if (!tx || isFinalPaymentStatus(tx.status)) return;
+  const timestamp = now();
+  await pharmaDb.paymentTransactions.update(transactionId, {
+    status: "EXPIRED",
+    completedAt: timestamp,
+    failureReason: "No confirmation was received in time.",
+    updatedAt: timestamp,
+  });
+  await recordEvent({
+    transactionId,
+    saleId: tx.saleId,
+    provider: tx.provider ?? tx.method,
+    eventType: "STATUS_POLL",
+    status: "EXPIRED",
+    raw: "client_wait_expired",
+    receivedAt: timestamp,
+  });
 }
 
 export async function pollPayment(
@@ -476,6 +523,18 @@ export async function confirmBankTransfer(
     return tx.status;
   }
 
+  if (confirmed) {
+    // With a payments server the bank payment is confirmed by the provider,
+    // never by a button press.
+    const gateway = await getGatewayConfig("BANK_TRANSFER");
+    const demo = gateway?.config?.["demoMode"] === "true";
+    if (!demo && (await loadPaymentsServerConfig())) {
+      throw new Error(
+        "Bank payments are confirmed automatically by the provider. Please wait for the confirmation.",
+      );
+    }
+  }
+
   const status: PaymentStatus = confirmed ? "SUCCESS" : "FAILED";
   const timestamp = now();
   await pharmaDb.paymentTransactions.update(transactionId, {
@@ -526,6 +585,12 @@ export async function markPaypalCompleted(
   if (tx.provider !== "PAYPAL") {
     throw new Error("Only PayPal transactions can be marked complete by callback.");
   }
+  const paypal = await getGatewayConfig("PAYPAL");
+  if (paypal?.config?.["demoMode"] !== "true") {
+    throw new Error(
+      "PayPal payments are confirmed automatically by PayPal. They cannot be marked paid by hand.",
+    );
+  }
   const status: PaymentStatus = "SUCCESS";
   const timestamp = now();
   await pharmaDb.paymentTransactions.update(transactionId, {
@@ -545,7 +610,7 @@ export async function markPaypalCompleted(
     providerStatus: "SUCCESS",
     providerTransactionId: tx.providerReference,
     confirmationReference: tx.providerReference,
-    providerResponse: "paypalCallback approved=1",
+    providerResponse: "paypalCallback approved=1 (demo mode)",
     verified: true,
     verifiedAt: timestamp,
     amount: tx.amount,

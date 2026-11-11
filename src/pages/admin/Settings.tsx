@@ -18,6 +18,7 @@ import {
   gatewayEnvLabel,
 } from "../../lib/payments/gateway";
 import { saveGatewayConfig } from "../../lib/payments/service";
+import { PaymentsServerCard } from "../../components/settings/PaymentsServerCard";
 import {
   TIER_META,
   TIER_MODULES,
@@ -35,7 +36,7 @@ import type { GatewayEnvironment, PaymentGateway } from "../../types";
 const CURRENCIES = ["UGX", "KES", "TZS", "RWF", "USD", "EUR", "GBP"];
 
 const SIM_OUTCOMES = [
-  { value: "", label: "Random (default simulation)" },
+  { value: "", label: "Random (demo only)" },
   { value: "SUCCESS", label: "Always succeed" },
   { value: "FAILED", label: "Always fail" },
   { value: "TIMEOUT", label: "Always time out" },
@@ -58,10 +59,7 @@ function GatewayConfigCard({
   const [environment, setEnvironment] = useState<GatewayEnvironment>(
     gateway?.environment ?? "sandbox",
   );
-  const [merchantId, setMerchantId] = useState(gateway?.merchantId ?? "");
-  const [apiKey, setApiKey] = useState(gateway?.apiKey ?? "");
-  const [apiSecret, setApiSecret] = useState(gateway?.apiSecret ?? "");
-  const [webhookUrl, setWebhookUrl] = useState(gateway?.webhookUrl ?? "");
+  const [demo, setDemo] = useState(gateway?.config?.["demoMode"] === "true");
   const [simOutcome, setSimOutcome] = useState(
     gateway?.config?.["simOutcome"] ?? "",
   );
@@ -71,28 +69,24 @@ function GatewayConfigCard({
   useEffect(() => {
     setEnabled(gateway?.enabled ?? false);
     setEnvironment(gateway?.environment ?? "sandbox");
-    setMerchantId(gateway?.merchantId ?? "");
-    setApiKey(gateway?.apiKey ?? "");
-    setApiSecret(gateway?.apiSecret ?? "");
-    setWebhookUrl(gateway?.webhookUrl ?? "");
+    setDemo(gateway?.config?.["demoMode"] === "true");
     setSimOutcome(gateway?.config?.["simOutcome"] ?? "");
   }, [gateway]);
 
-  const connected = Boolean(apiKey);
+  const connected = enabled && !demo;
 
   const handleSave = async () => {
     setSaving(true);
     const config: Record<string, string> = {};
-    if (simOutcome) config["simOutcome"] = simOutcome;
+    if (demo) config["demoMode"] = "true";
+    if (demo && simOutcome) config["simOutcome"] = simOutcome;
+    // Provider secrets live on the payments server only. Saving clears any
+    // key that an older version stored in this browser.
     await saveGatewayConfig({
       provider,
       label,
       enabled,
       environment,
-      merchantId: merchantId || undefined,
-      apiKey: apiKey || undefined,
-      apiSecret: apiSecret || undefined,
-      webhookUrl: webhookUrl || undefined,
       config,
     });
     await pharmaDb.auditLogs.add({
@@ -117,12 +111,14 @@ function GatewayConfigCard({
             {label}
             <span
               className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                connected
-                  ? "bg-emerald-50 text-emerald-600"
-                  : "bg-slate-100 text-slate-500"
+                demo
+                  ? "bg-amber-50 text-amber-600"
+                  : connected
+                    ? "bg-emerald-50 text-emerald-600"
+                    : "bg-slate-100 text-slate-500"
               }`}
             >
-              {connected ? "Configured" : "Not configured"}
+              {demo ? "Demo simulation" : connected ? "Live" : "Disabled"}
             </span>
           </div>
           <p className="mt-0.5 text-xs text-slate-500">
@@ -159,35 +155,18 @@ function GatewayConfigCard({
           <option value="sandbox">Sandbox (test)</option>
           <option value="production">Production (live)</option>
         </SelectInput>
-        <TextInput
-          label="Merchant / Account ID"
-          value={merchantId}
-          onChange={(e) => setMerchantId(e.target.value)}
-          placeholder="e.g. 2567xxxxxx"
-        />
-        <TextInput
-          label="API Key / Subscription Key"
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder="Paste key here"
-        />
-        <TextInput
-          label="API Secret"
-          type="password"
-          value={apiSecret}
-          onChange={(e) => setApiSecret(e.target.value)}
-          placeholder="Optional"
-        />
-        <TextInput
-          label="Webhook URL"
-          value={webhookUrl}
-          onChange={(e) => setWebhookUrl(e.target.value)}
-          placeholder="https://..."
-        />
         <SelectInput
-          label="Simulation Outcome"
+          label="Mode"
+          value={demo ? "demo" : "live"}
+          onChange={(e) => setDemo(e.target.value === "demo")}
+        >
+          <option value="live">Live (real provider via server)</option>
+          <option value="demo">Demo simulation (no real money)</option>
+        </SelectInput>
+        <SelectInput
+          label="Demo outcome"
           value={simOutcome}
+          disabled={!demo}
           onChange={(e) => setSimOutcome(e.target.value)}
         >
           {SIM_OUTCOMES.map((o) => (
@@ -666,9 +645,11 @@ export function SettingsPage() {
           )}
         </Card>
 
+        <PaymentsServerCard actorId={user?.id} />
+
         <Card
           title="Payment Gateways"
-          subtitle="Configure payment providers used by the Payment Center (MTN / Airtel / bank / card / PayPal)"
+          subtitle="Enable each provider, or switch it to demo simulation for staff training"
           className="lg:col-span-2"
         >
           {!user ? (

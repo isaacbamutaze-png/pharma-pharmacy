@@ -1,0 +1,13 @@
+{
+  "name": "pharma-payments-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PHARMA secure payment + AI gateway (Flutterwave mobile money/card/bank, PayPal, Claude assistant). Zero runtime dependencies.",
+  "main": "index.mjs",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node test/run.mjs"
+  }
+}

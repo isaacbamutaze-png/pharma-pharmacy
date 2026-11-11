@@ -4,54 +4,21 @@ import type {
   PaymentMethod,
   ProviderEventType,
 } from "../../types";
-
-declare global {
-  interface Window {
-    FlutterwaveCheckout?: (config: FlutterwaveCheckoutConfig) => void;
-  }
-}
-
-interface FlutterwaveCheckoutConfig {
-  public_key: string;
-  tx_ref: string;
-  amount: number;
-  currency: string;
-  country?: string;
-  payment_options?: string;
-  customer?: { email?: string; phone_number?: string; name?: string };
-  callback: (response: FlutterwaveCallbackResponse) => void;
-  onclose: () => void;
-  meta?: Record<string, unknown>;
-  customizations?: {
-    title?: string;
-    description?: string;
-    logo?: string;
-  };
-}
-
-interface FlutterwaveCallbackResponse {
-  transaction_id: number;
-  tx_ref: string;
-  status: string;
-  amount: number;
-  currency: string;
-  charged_amount: number;
-  flw_ref: string;
-  payment_type: string;
-  app_fee: number;
-  merchant_fee: number;
-  processor_response: string;
-  auth_model: string;
-  customer: { id: number; name: string; phone_number: string; email: string };
-}
+import {
+  NetworkUnavailableError,
+  PaymentsServerError,
+  loadPaymentsServerConfig,
+  remote,
+  type RemoteStatus,
+} from "./remote";
 
 export const GATEWAY_PROVIDERS = [
   { id: "MTN_MOMO", label: "MTN Mobile Money", method: "MOBILE_MONEY" },
   { id: "AIRTEL_MONEY", label: "Airtel Money", method: "MOBILE_MONEY" },
   { id: "BANK_TRANSFER", label: "Bank Transfer", method: "BANK" },
-  { id: "CARD_TERMINAL", label: "Card Terminal", method: "CARD" },
+  { id: "CARD_TERMINAL", label: "Card (Online)", method: "CARD" },
   { id: "PAYPAL", label: "PayPal", method: "PAYPAL" },
-  { id: "FLW_INLINE", label: "Flutterwave", method: "MOBILE_MONEY" },
+  { id: "FLW_INLINE", label: "Flutterwave (All)", method: "MOBILE_MONEY" },
 ] as const;
 
 export type GatewayProviderId = (typeof GATEWAY_PROVIDERS)[number]["id"];
@@ -78,6 +45,8 @@ export interface GatewayContext {
   amount: number;
   currency: string;
   customerReference?: string;
+  /** For refunds: id of the original COLLECTION transaction being refunded. */
+  originalTransactionId?: string;
   gateway?: PaymentGateway;
 }
 
@@ -96,6 +65,8 @@ export interface GatewayResult {
   status: GatewayStatus;
   providerReference?: string;
   message?: string;
+  /** Page the customer must open to pay (card / bank / PayPal). */
+  actionUrl?: string;
   events: Array<{
     eventType: ProviderEventType;
     status: string;
@@ -286,217 +257,190 @@ export function createMobileMoneyAdapter(
   };
 }
 
-const FLW_RESULTS = new Map<
-  string,
-  {
-    status: "SUCCESS" | "FAILED" | "CANCELLED";
-    response?: FlutterwaveCallbackResponse;
-  }
->();
+/* ------------------------------------------------------------------ */
+/* Live adapters: every online payment goes through the PHARMA server   */
+/* ------------------------------------------------------------------ */
 
-let flwScriptLoaded = false;
-
-function ensureFlwScript(): Promise<void> {
-  if (flwScriptLoaded) return Promise.resolve();
-  if (typeof document === "undefined") return Promise.resolve();
-  return new Promise((resolve) => {
-    const existing = document.querySelector(
-      'script[src="https://checkout.flutterwave.com/checkout.js"]',
-    );
-    if (existing) {
-      flwScriptLoaded = true;
-      resolve();
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = "https://checkout.flutterwave.com/checkout.js";
-    script.onload = () => {
-      flwScriptLoaded = true;
-      resolve();
-    };
-    script.onerror = () => resolve();
-    document.head.appendChild(script);
-  });
+function isDemoMode(context: GatewayContext): boolean {
+  return context.gateway?.config?.["demoMode"] === "true";
 }
 
-function createFlutterwaveAdapter(): PaymentGatewayAdapter {
-  return {
-    provider: "FLW_INLINE",
-    label: "Flutterwave",
-    method: "MOBILE_MONEY",
+const NO_SERVER_MESSAGE =
+  "Online payments are not set up yet. An admin must enter the Payments Server URL and key in Settings > Payments Server.";
+
+function remoteEvent(
+  eventType: ProviderEventType,
+  status: string,
+  raw: string,
+): GatewayResult["events"][number] {
+  return { eventType, status, raw };
+}
+
+function toGatewayStatus(s: RemoteStatus): GatewayStatus {
+  return s;
+}
+
+/**
+ * Wraps a legacy (simulated) adapter so that:
+ *  - demo mode (Settings > Payment Gateways) still uses the simulator, and
+ *  - live mode talks to the PHARMA payments server, which asks the real provider.
+ * A payment is SUCCESS only when the provider confirmed it for the right amount.
+ */
+function createLiveAdapter(
+  legacy: PaymentGatewayAdapter,
+  options: { manualFallback?: boolean } = {},
+): PaymentGatewayAdapter {
+  const live: PaymentGatewayAdapter = {
+    provider: legacy.provider,
+    label: legacy.label,
+    method: legacy.method,
+
     async collect(context) {
-      const gateway = context.gateway;
-      const publicKey = gateway?.apiKey?.trim();
-      if (!publicKey) {
+      if (isDemoMode(context)) return legacy.collect(context);
+      const cfg = await loadPaymentsServerConfig();
+      if (!cfg) {
+        if (options.manualFallback) return legacy.collect(context);
+        return {
+          status: "FAILED",
+          message: NO_SERVER_MESSAGE,
+          events: [remoteEvent("REQUEST", "FAILED", "payments_server_not_configured")],
+        };
+      }
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
         return {
           status: "FAILED",
           message:
-            "Flutterwave public key is not configured. Add it in Settings > Payment Gateways.",
-          events: [
-            {
-              eventType: "REQUEST",
-              status: "FAILED",
-              raw: "flutterwave_missing_public_key",
-            },
-          ],
+            "No internet connection. Online payments need internet. Use cash or try again when you are back online.",
+          events: [remoteEvent("REQUEST", "FAILED", "offline_before_request")],
         };
       }
-
-      await ensureFlwScript();
-
-      if (!window.FlutterwaveCheckout) {
-        return {
-          status: "FAILED",
-          message:
-            "Failed to load the Flutterwave checkout script. Check your network connection.",
-          events: [
-            {
-              eventType: "REQUEST",
-              status: "FAILED",
-              raw: "flutterwave_script_not_loaded",
-            },
-          ],
-        };
-      }
-
-      const environment = gateway?.environment ?? "sandbox";
-      const isLive = environment === "production";
-
-      window.FlutterwaveCheckout({
-        public_key: isLive
-          ? publicKey
-          : publicKey,
-        tx_ref: context.transactionId,
-        amount: context.amount,
-        currency: context.currency === "USD" ? "USD" : "UGX",
-        country: "UG",
-        payment_options: "mobilemoneyuganda,card,banktransfer,ussd",
-        customer: context.customerReference
-          ? { phone_number: context.customerReference }
-          : undefined,
-        meta: {
-          saleId: context.saleId,
-          provider: "FLW_INLINE",
-        },
-        customizations: {
-          title: "PHARMA Pharmacy",
-          description: `Payment for sale ${context.saleId ?? ""}`.trim(),
-        },
-        callback(response) {
-          if (response.status === "successful") {
-            FLW_RESULTS.set(context.transactionId, {
-              status: "SUCCESS",
-              response,
-            });
-          } else {
-            FLW_RESULTS.set(context.transactionId, {
-              status: "FAILED",
-              response,
-            });
-          }
-        },
-        onclose() {
-          if (!FLW_RESULTS.has(context.transactionId)) {
-            FLW_RESULTS.set(context.transactionId, {
-              status: "CANCELLED",
-            });
-          }
-        },
-      });
-
-      return {
-        status: "PROCESSING",
-        message:
-          "Flutterwave checkout opened. Complete the payment in the popup window.",
-        events: [
-          {
-            eventType: "REQUEST",
-            status: "PROCESSING",
-            raw: `flutterwave_checkout amount=${context.amount} currency=${context.currency} txRef=${context.transactionId}`,
-          },
-        ],
-      };
-    },
-    async checkStatus(context, _reference) {
-      const result = FLW_RESULTS.get(context.transactionId);
-      if (!result) {
-        return {
-          status: "PROCESSING",
-          message: "Awaiting payment completion.",
-          events: [
-            {
-              eventType: "STATUS_POLL",
-              status: "PROCESSING",
-              raw: `flutterwave_poll txRef=${context.transactionId} -> PENDING`,
-            },
-          ],
-        };
-      }
-      return {
-        status: result.status,
-        providerReference: result.response?.flw_ref,
-        message:
-          result.status === "SUCCESS"
-            ? "Payment confirmed by Flutterwave."
-            : result.status === "CANCELLED"
-              ? "Payment was cancelled."
-              : "Payment failed.",
-        events: [
-          {
-            eventType: "STATUS_POLL",
-            status: result.status,
-            raw: `flutterwave_poll txRef=${context.transactionId} -> ${result.status}`,
-          },
-        ],
-      };
-    },
-    async confirm(context, _reference) {
-      const result = FLW_RESULTS.get(context.transactionId);
-      if (!result) {
-        return {
-          status: "PENDING",
-          providerTransactionId: undefined,
-          confirmationReference: undefined,
-          amount: context.amount,
-          raw: JSON.stringify({ event: "confirmation", status: "PENDING" }),
-        };
-      }
-      const providerTransactionId = result.response
-        ? String(result.response.transaction_id)
-        : undefined;
-      const confirmationReference = result.response?.flw_ref;
-      return {
-        status: result.status,
-        providerTransactionId,
-        confirmationReference,
-        amount: result.response?.amount ?? context.amount,
-        raw: JSON.stringify({
-          event: "confirmation",
-          provider: "FLW_INLINE",
-          status: result.status,
-          transactionId: providerTransactionId,
-          flwRef: confirmationReference,
+      try {
+        const r = await remote.initiate(cfg, {
+          txRef: context.transactionId,
+          provider: context.provider,
           amount: context.amount,
           currency: context.currency,
-          timestamp: new Date().toISOString(),
-        }),
+          phone: context.customerReference,
+          saleId: context.saleId,
+        });
+        return {
+          status: toGatewayStatus(r.status),
+          providerReference: r.providerReference,
+          message: r.message,
+          actionUrl: r.actionUrl,
+          events: [
+            remoteEvent(
+              "REQUEST",
+              r.status,
+              `server_initiate provider=${context.provider} amount=${context.amount} ${context.currency} ref=${r.providerReference ?? "-"}`,
+            ),
+          ],
+        };
+      } catch (err) {
+        if (err instanceof NetworkUnavailableError) {
+          // The request may or may not have reached the server: never guess.
+          return {
+            status: "UNKNOWN",
+            message:
+              "Lost connection while starting the payment. Press 'Check payment status' before trying again so the customer is not charged twice.",
+            events: [remoteEvent("REQUEST", "UNKNOWN", "network_error_on_initiate")],
+          };
+        }
+        return {
+          status: "FAILED",
+          message: err instanceof Error ? err.message : "Payment could not be started.",
+          events: [remoteEvent("REQUEST", "FAILED", "server_rejected_initiate")],
+        };
+      }
+    },
+
+    async checkStatus(context, reference) {
+      const r = await live.confirm(context, reference);
+      return {
+        status: r.status,
+        providerReference: reference || undefined,
+        events: [remoteEvent("STATUS_POLL", r.status, `server_status ${r.status}`)],
       };
     },
+
+    async confirm(context, reference) {
+      if (isDemoMode(context)) return legacy.confirm(context, reference);
+      const cfg = await loadPaymentsServerConfig();
+      if (!cfg) {
+        if (options.manualFallback) return legacy.confirm(context, reference);
+        return {
+          status: "PENDING",
+          amount: context.amount,
+          raw: JSON.stringify({ status: "PENDING", note: "payments_server_not_configured" }),
+        };
+      }
+      try {
+        const r = await remote.status(cfg, context.transactionId);
+        return {
+          status: toGatewayStatus(r.status),
+          providerTransactionId: r.providerTransactionId,
+          confirmationReference: r.providerReference,
+          amount: r.amount,
+          raw: JSON.stringify({
+            event: "confirmation",
+            source: "payments_server",
+            provider: context.provider,
+            status: r.status,
+            amount: r.amount,
+            currency: r.currency,
+            transactionId: r.providerTransactionId,
+            message: r.message,
+            timestamp: new Date().toISOString(),
+          }),
+        };
+      } catch (err) {
+        if (err instanceof PaymentsServerError && err.status === 404) {
+          // The server never saw this payment, so no money can have moved.
+          return {
+            status: "FAILED",
+            amount: context.amount,
+            raw: JSON.stringify({ status: "FAILED", note: "unknown_to_server" }),
+          };
+        }
+        // Offline or server hiccup: stay undecided and keep polling. Never guess.
+        return {
+          status: "PROCESSING",
+          amount: context.amount,
+          raw: JSON.stringify({ status: "PROCESSING", note: "status_unavailable" }),
+        };
+      }
+    },
+
     async refund(context, reference) {
-      return {
-        status: "SUCCESS",
-        providerReference: `REF-${reference}`,
-        message: "Refund processed by Flutterwave.",
-        events: [
-          {
-            eventType: "WEBHOOK",
-            status: "SUCCESS",
-            raw: `flutterwave_refund transactionId=${context.transactionId} reference=${reference}`,
-          },
-        ],
-      };
+      if (isDemoMode(context)) return legacy.refund(context, reference);
+      const cfg = await loadPaymentsServerConfig();
+      const original = context.originalTransactionId;
+      if (!cfg || !original) {
+        return {
+          status: "FAILED",
+          message:
+            "The provider refund could not be sent automatically. Refund the customer manually and note it here.",
+          events: [remoteEvent("WEBHOOK", "FAILED", "refund_not_sent")],
+        };
+      }
+      try {
+        const r = await remote.refund(cfg, original, context.amount);
+        return {
+          status: "SUCCESS",
+          providerReference: r.refundReference,
+          message: "Refund sent to the provider.",
+          events: [remoteEvent("WEBHOOK", "SUCCESS", `server_refund ref=${r.refundReference ?? "-"}`)],
+        };
+      } catch (err) {
+        return {
+          status: "FAILED",
+          message: err instanceof Error ? err.message : "Refund failed.",
+          events: [remoteEvent("WEBHOOK", "FAILED", "server_refund_failed")],
+        };
+      }
     },
   };
+  return live;
 }
 
 function createBankTransferAdapter(): PaymentGatewayAdapter {
@@ -706,12 +650,14 @@ function createPayPalAdapter(): PaymentGatewayAdapter {
 }
 
 const ADAPTERS: PaymentGatewayAdapter[] = [
-  createMobileMoneyAdapter("MTN_MOMO", "MTN Mobile Money", "MTN"),
-  createMobileMoneyAdapter("AIRTEL_MONEY", "Airtel Money", "AIRTEL"),
-  createBankTransferAdapter(),
-  createCardTerminalAdapter(),
-  createPayPalAdapter(),
-  createFlutterwaveAdapter(),
+  createLiveAdapter(createMobileMoneyAdapter("MTN_MOMO", "MTN Mobile Money", "MTN")),
+  createLiveAdapter(createMobileMoneyAdapter("AIRTEL_MONEY", "Airtel Money", "AIRTEL")),
+  // Bank: automatic through the server; if no server is configured the cashier
+  // can still verify a deposit manually (the original, honest manual flow).
+  createLiveAdapter(createBankTransferAdapter(), { manualFallback: true }),
+  createLiveAdapter(createCardTerminalAdapter()),
+  createLiveAdapter(createPayPalAdapter()),
+  createLiveAdapter(createMobileMoneyAdapter("FLW_INLINE", "Flutterwave (All)", "FLW")),
 ];
 
 export function getAdapter(

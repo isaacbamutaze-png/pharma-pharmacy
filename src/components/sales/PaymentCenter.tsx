@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Banknote,
   CheckCircle2,
+  ExternalLink,
   CreditCard,
   Loader2,
   RefreshCw,
@@ -15,10 +16,12 @@ import {
   confirmBankTransfer,
   markPaypalCompleted,
   cancelPayment,
+  expirePayment,
   getConfirmationsForTransaction,
 } from "../../lib/payments/service";
 import { GATEWAY_PROVIDERS, getAdapter } from "../../lib/payments/gateway";
 import { PAYMENT_COLOR, PAYMENT_LABEL } from "../../lib/payments/constants";
+import { pharmaDb } from "../../db";
 import { formatMoney, uid } from "../../lib/utils";
 import { round2 } from "../../lib/sales";
 import { Button } from "../ui/Button";
@@ -52,6 +55,8 @@ interface GatewaySession {
   providerTransactionId?: string;
   confirmationId?: string;
   message?: string;
+  actionUrl?: string;
+  startedAt: number;
 }
 
 interface PaymentCenterProps {
@@ -67,12 +72,14 @@ interface PaymentCenterProps {
   onInFlightChange?: (inFlight: boolean) => void;
 }
 
-const POLL_PROVIDERS = new Set([
-  "MTN_MOMO",
-  "AIRTEL_MONEY",
-  "CARD_TERMINAL",
-  "FLW_INLINE",
-]);
+/** How long the cashier waits before the request is shown as expired. */
+function waitWindowMs(provider: string): number {
+  // Mobile money: customer must type a PIN on the phone (server gives up at ~4 min).
+  if (provider === "MTN_MOMO" || provider === "AIRTEL_MONEY") return 4.5 * 60_000;
+  return 30 * 60_000;
+}
+
+const POLL_EVERY_MS = 3000;
 
 export function PaymentCenter({
   currency,
@@ -96,6 +103,12 @@ export function PaymentCenter({
   );
   const [amountTouched, setAmountTouched] = useState(false);
   const [session, setSession] = useState<GatewaySession | null>(null);
+  const [phone, setPhone] = useState(customerPhone ?? "");
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (customerPhone) setPhone(customerPhone);
+  }, [customerPhone]);
 
   const sessionRef = useRef<GatewaySession | null>(null);
   useEffect(() => {
@@ -147,6 +160,13 @@ export function PaymentCenter({
       onError("Enter an amount to collect first.");
       return;
     }
+    const isMobile = def.id === "MTN_MOMO" || def.id === "AIRTEL_MONEY";
+    if (isMobile && phone.replace(/\D/g, "").length < 9) {
+      onError(
+        "Enter the customer's mobile money number first. The PIN prompt is sent to that phone.",
+      );
+      return;
+    }
     try {
       const saleId = await onEnsureDraft();
       const result = await initiatePayment({
@@ -155,8 +175,12 @@ export function PaymentCenter({
         provider: def.id,
         amount,
         currency,
-        customerReference: customerPhone?.trim() || undefined,
+        customerReference: phone.trim() || undefined,
       });
+      if (result.actionUrl && typeof window !== "undefined") {
+        // Some browsers block this popup; the dialog also has an "Open" button.
+        window.open(result.actionUrl, "_blank", "noopener,noreferrer");
+      }
       setSession({
         provider: def.id,
         providerLabel: getAdapter(def.id)?.label ?? def.id,
@@ -167,6 +191,8 @@ export function PaymentCenter({
         providerReference: result.providerReference,
         paymentReference: result.paymentReference,
         message: result.message,
+        actionUrl: result.actionUrl,
+        startedAt: Date.now(),
       });
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to start payment.");
@@ -181,47 +207,70 @@ export function PaymentCenter({
     const active = sessionRef.current;
     if (!active) return;
     if (active.status !== "PROCESSING") return;
-    if (!POLL_PROVIDERS.has(active.provider)) return;
 
-    let cancelled = false;
-    let attempts = 0;
+    let stopped = false;
     const transactionId = active.transactionId;
+    const deadline = active.startedAt + waitWindowMs(active.provider);
 
     const tick = async () => {
-      if (cancelled) return;
-      attempts += 1;
-      if (attempts > 12) {
-        setSession((prev) =>
-          prev
-            ? {
-                ...prev,
-                status: "EXPIRED",
-                message: "No confirmation received. The request expired.",
-              }
-            : prev,
-        );
+      if (stopped) return;
+      setNow(Date.now());
+      let status: PaymentStatus;
+      try {
+        status = await pollPayment(transactionId);
+      } catch {
+        return; // transient (offline): keep waiting, never guess
+      }
+      if (stopped) return;
+      const current = sessionRef.current;
+      if (!current || current.transactionId !== transactionId) return;
+
+      if (status === "SUCCESS") {
+        stopped = true;
+        clearInterval(interval);
+        void finalizeGateway({ ...current, status: "SUCCESS" });
         return;
       }
-      const status = await pollPayment(transactionId);
-      if (cancelled) return;
-      const current = sessionRef.current;
-      if (!current) return;
-      if (status === "SUCCESS") {
-        void finalizeGateway({ ...current, status: "SUCCESS" });
-      } else if (status === "FAILED" || status === "EXPIRED") {
-        setSession((prev) => (prev ? { ...prev, status } : prev));
-      } else {
-        setSession((prev) => (prev ? { ...prev, status } : prev));
+      if (status === "PROCESSING" || status === "PENDING") {
+        if (Date.now() > deadline) {
+          stopped = true;
+          clearInterval(interval);
+          await expirePayment(transactionId);
+          setSession((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  status: "EXPIRED",
+                  message:
+                    "No confirmation was received. The customer did not approve in time, so nothing was recorded as paid.",
+                }
+              : prev,
+          );
+        }
+        return;
       }
+      // FAILED / DECLINED / CANCELLED / TIMEOUT / EXPIRED / UNKNOWN
+      stopped = true;
+      clearInterval(interval);
+      const failure = await pharmaDb.paymentTransactions.get(transactionId);
+      setSession((prev) =>
+        prev
+          ? {
+              ...prev,
+              status,
+              message: failure?.failureReason ?? prev.message,
+            }
+          : prev,
+      );
     };
 
-    const interval = setInterval(tick, 2500);
+    const interval = setInterval(tick, POLL_EVERY_MS);
     return () => {
-      cancelled = true;
+      stopped = true;
       clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.transactionId]);
+  }, [session?.transactionId, session?.status === "PROCESSING"]);
 
   const handleCash = () => {
     onError(null);
@@ -393,6 +442,20 @@ export function PaymentCenter({
         </div>
       </div>
 
+      <div>
+        <label className="mb-1 block text-xs font-medium text-slate-600">
+          Customer phone (Mobile Money PIN prompt is sent here)
+        </label>
+        <TextInput
+          type="tel"
+          inputMode="tel"
+          placeholder="e.g. 0772 123 456"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          disabled={!!session}
+        />
+      </div>
+
       <div className="grid grid-cols-2 gap-2">
         <Button
           variant="outline"
@@ -480,6 +543,31 @@ export function PaymentCenter({
                 until that confirmation is verified.
               </div>
             )}
+            {session.status === "PROCESSING" &&
+              (session.provider === "MTN_MOMO" ||
+                session.provider === "AIRTEL_MONEY") && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                  A prompt was sent to the customer's phone. Ask them to enter
+                  their PIN to approve. This screen updates by itself.
+                  <span className="mt-1 block text-xs text-emerald-700">
+                    Waiting {Math.max(0, Math.round((now - session.startedAt) / 1000))}s
+                    of {Math.round(waitWindowMs(session.provider) / 1000)}s
+                  </span>
+                </div>
+              )}
+            {session.actionUrl &&
+              (session.status === "PROCESSING" ||
+                session.status === "PENDING") && (
+                <a
+                  href={session.actionUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 rounded-lg bg-green-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-green-800"
+                >
+                  <ExternalLink size={16} />
+                  Open secure payment page
+                </a>
+              )}
             {session.paymentReference && (
               <p className="font-mono text-xs text-slate-400">
                 Payment: {session.paymentReference}
