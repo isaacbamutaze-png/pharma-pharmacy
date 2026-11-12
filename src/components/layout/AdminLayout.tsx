@@ -57,6 +57,7 @@ const adminSections: NavSection[] = [
       { to: "/admin/batches", label: "Receive Stock", icon: PackagePlus, moduleId: "BATCHES" },
       { to: "/admin/suppliers", label: "Suppliers", icon: Truck, moduleId: "SUPPLIERS" },
       { to: "/admin/stock-movements", label: "Stock Movements", icon: ArrowLeftRight, moduleId: "STOCK_MOVEMENTS" },
+      { to: "/admin/stock-takes", label: "Stock Taking", icon: ClipboardCheck, moduleId: "STOCK_TAKES" },
       { to: "/admin/payments", label: "Payments & Transactions", icon: ReceiptCent, moduleId: "PAYMENTS" },
       { to: "/admin/refunds", label: "Refunds & Returns", icon: Undo2, moduleId: "REFUNDS" },
     ],

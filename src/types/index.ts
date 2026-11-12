@@ -87,6 +87,36 @@ export interface SystemSetting {
   updatedAt: number;
 }
 
+export type StockTakeStatus = "COUNTING" | "SUBMITTED" | "APPROVED" | "REJECTED";
+
+export interface StockTake {
+  id: string;
+  takeNumber: string;
+  status: StockTakeStatus;
+  note?: string;
+  createdBy: string;
+  createdAt: number;
+  submittedAt?: number;
+  approvedBy?: string;
+  approvedAt?: number;
+  rejectedReason?: string;
+}
+
+export interface StockTakeItem {
+  id: string;
+  stockTakeId: string;
+  medicineId: string;
+  medicineName: string;
+  batchId: string;
+  batchNumber: string;
+  expiryDate: string;
+  /** Quantity the system held when the count started (base units). */
+  systemQty: number;
+  physicalQty?: number;
+  variance?: number;
+  reason?: string;
+}
+
 export interface AuditLog {
   id: string;
   userId: string;
