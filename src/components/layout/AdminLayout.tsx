@@ -31,6 +31,7 @@ import {
   ShieldPlus,
   Sparkles,
   History,
+  Banknote,
 } from "lucide-react";
 import { useEnabledModules, moduleEnabled } from "../../lib/modules";
 
@@ -85,6 +86,7 @@ const adminSections: NavSection[] = [
   {
     title: "Finance",
     items: [
+      { to: "/admin/shifts", label: "Shifts & Cash Drawer", icon: Banknote, moduleId: "SHIFTS" },
       { to: "/admin/expenses", label: "Expenses", icon: Wallet, moduleId: "EXPENSES" },
       { to: "/admin/balancing", label: "Book Balancing", icon: Scale, moduleId: "BALANCING" },
       { to: "/admin/reports", label: "Reports & Analytics", icon: BarChart3, moduleId: "REPORTS" },

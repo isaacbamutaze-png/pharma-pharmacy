@@ -5,6 +5,8 @@ import type {
   AuditLog,
   StockTake,
   StockTakeItem,
+  Shift,
+  CashDrawerMovement,
   ControlRequisition,
   ControlledDrugCount,
   ControlledDrugRegisterEntry,
@@ -72,6 +74,8 @@ export const pharmaDb = new Dexie("pharma") as Dexie & {
   expenses: EntityTable<Expense, "id">;
   systemSettings: EntityTable<SystemSetting, "id">;
   auditLogs: EntityTable<AuditLog, "id">;
+  shifts: EntityTable<Shift, "id">;
+  cashDrawerMovements: EntityTable<CashDrawerMovement, "id">;
   stockTakes: EntityTable<StockTake, "id">;
   stockTakeItems: EntityTable<StockTakeItem, "id">;
   payments: EntityTable<Payment, "id">;
@@ -281,6 +285,12 @@ pharmaDb.version(14).stores({
   stockTakeItems: "id, stockTakeId, batchId",
 });
 
+// Additive: cashier shifts and cash drawer.
+pharmaDb.version(15).stores({
+  shifts: "id, cashierId, status, openedAt",
+  cashDrawerMovements: "id, shiftId, createdAt",
+});
+
 const TRANSACTIONAL_TABLES = [
   "sales",
   "saleItems",
@@ -307,6 +317,8 @@ const TRANSACTIONAL_TABLES = [
   "auditLogs",
   "stockTakes",
   "stockTakeItems",
+  "shifts",
+  "cashDrawerMovements",
   "safetyAlertChecks",
   "controlledDrugRegister",
   "controlRequisitions",

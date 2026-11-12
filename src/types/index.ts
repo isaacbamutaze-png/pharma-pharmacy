@@ -87,6 +87,34 @@ export interface SystemSetting {
   updatedAt: number;
 }
 
+export interface Shift {
+  id: string;
+  shiftNumber: string;
+  cashierId: string;
+  cashierName: string;
+  status: "OPEN" | "CLOSED";
+  openedAt: number;
+  openingCash: number;
+  closedAt?: number;
+  closedBy?: string;
+  expectedCash?: number;
+  countedCash?: number;
+  variance?: number;
+  note?: string;
+}
+
+export type DrawerMovementType = "WITHDRAWAL" | "DEPOSIT" | "EXPENSE";
+
+export interface CashDrawerMovement {
+  id: string;
+  shiftId: string;
+  type: DrawerMovementType;
+  amount: number;
+  reason: string;
+  performedBy: string;
+  createdAt: number;
+}
+
 export type StockTakeStatus = "COUNTING" | "SUBMITTED" | "APPROVED" | "REJECTED";
 
 export interface StockTake {

@@ -40,6 +40,8 @@ interface AuthState {
   user: SessionUser | null;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Re-checks the saved session against the database (role, status). */
+  revalidate: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -117,6 +119,25 @@ export const useAuthStore = create<AuthState>()(
 
       logout: async () => {
         set({ user: null });
+      },
+
+      revalidate: async () => {
+        const saved = useAuthStore.getState().user;
+        if (!saved) return;
+        try {
+          const row = await pharmaDb.users.get(saved.id);
+          const role = row ? ((await pharmaDb.roles.get(row.roleId)) as RoleRecord | undefined) : undefined;
+          if (!row || row.status !== "ACTIVE" || !role) {
+            set({ user: null }); // deleted or deactivated since last visit
+            return;
+          }
+          // The role always comes from the database, not from editable browser storage.
+          if (role.name !== saved.role || row.fullName !== saved.fullName) {
+            set({ user: { ...saved, role: role.name, fullName: row.fullName } });
+          }
+        } catch {
+          /* database unavailable: keep the session, nothing to compare with */
+        }
       },
     }),
     {

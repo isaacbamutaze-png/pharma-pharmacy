@@ -11,6 +11,7 @@ import {
   Undo2,
   Contact,
   ClipboardPlus,
+  Wallet,
 } from "lucide-react";
 import { useEnabledModules, moduleEnabled } from "../../lib/modules";
 
@@ -29,6 +30,7 @@ const userSections: NavSection[] = [
       { to: "/medicines", label: "Medicines", icon: Pill },
       { to: "/payments", label: "Payments & Transactions", icon: ReceiptCent },
       { to: "/refunds", label: "Refunds & Returns", icon: Undo2 },
+      { to: "/shifts", label: "My Shift & Cash", icon: Wallet, moduleId: "SHIFTS" },
       { to: "/alerts", label: "Alerts", icon: Bell },
     ],
   },

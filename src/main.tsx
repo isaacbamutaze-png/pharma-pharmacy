@@ -3,8 +3,10 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App";
 import { requestPersistentStorage } from "./lib/backup";
+import { useAuthStore } from "./store/authStore";
 
 void requestPersistentStorage();
+void useAuthStore.getState().revalidate();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

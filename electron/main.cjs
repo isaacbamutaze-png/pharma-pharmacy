@@ -10,7 +10,8 @@ function createWindow() {
     title: 'PHARMA - Pharmacy Management System',
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      sandbox: true
     }
   });
 
@@ -20,8 +21,14 @@ function createWindow() {
   win.loadFile(indexPath);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    // Only ever hand real web links to the system browser.
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  // The app is a single local page: block navigating the window anywhere else.
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('file://')) event.preventDefault();
   });
 }
 
