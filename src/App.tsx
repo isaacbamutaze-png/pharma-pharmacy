@@ -47,6 +47,7 @@ import { ControlledMedicinesPage } from "./pages/admin/ControlledMedicines";
 import { DrugSafetyPage } from "./pages/admin/DrugSafety";
 import { AiAssistantPage } from "./pages/admin/Assistant";
 import { AuditTrailPage } from "./pages/admin/AuditTrail";
+import { StockTakesPage } from "./pages/admin/StockTakes";
 import { UserDashboard } from "./pages/user/Dashboard";
 import { UserMedicinesPage } from "./pages/user/Medicines";
 import { UserAlertsPage } from "./pages/user/Alerts";
@@ -194,6 +195,14 @@ function AppRoutes() {
         <Route path="users" element={<UsersPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="audit" element={<AuditTrailPage />} />
+        <Route
+          path="stock-takes"
+          element={
+            <ModuleGuard moduleId="STOCK_TAKES">
+              <StockTakesPage />
+            </ModuleGuard>
+          }
+        />
         <Route
           path="patients"
           element={

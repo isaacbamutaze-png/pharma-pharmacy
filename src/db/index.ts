@@ -3,6 +3,8 @@ import { uid, now } from "../lib/utils";
 import type {
   AssistantMessage,
   AuditLog,
+  StockTake,
+  StockTakeItem,
   ControlRequisition,
   ControlledDrugCount,
   ControlledDrugRegisterEntry,
@@ -70,6 +72,8 @@ export const pharmaDb = new Dexie("pharma") as Dexie & {
   expenses: EntityTable<Expense, "id">;
   systemSettings: EntityTable<SystemSetting, "id">;
   auditLogs: EntityTable<AuditLog, "id">;
+  stockTakes: EntityTable<StockTake, "id">;
+  stockTakeItems: EntityTable<StockTakeItem, "id">;
   payments: EntityTable<Payment, "id">;
   paymentTransactions: EntityTable<PaymentTransaction, "id">;
   paymentProviderEvents: EntityTable<PaymentProviderEvent, "id">;
@@ -271,6 +275,12 @@ pharmaDb.version(13).stores({
   assistantMessages: "id, role, intent, createdAt",
 });
 
+// Additive: stock taking with variance approval.
+pharmaDb.version(14).stores({
+  stockTakes: "id, status, createdAt",
+  stockTakeItems: "id, stockTakeId, batchId",
+});
+
 const TRANSACTIONAL_TABLES = [
   "sales",
   "saleItems",
@@ -295,6 +305,8 @@ const TRANSACTIONAL_TABLES = [
   "purchaseReturnItems",
   "stockMovements",
   "auditLogs",
+  "stockTakes",
+  "stockTakeItems",
   "safetyAlertChecks",
   "controlledDrugRegister",
   "controlRequisitions",
