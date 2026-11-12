@@ -30,6 +30,7 @@ import {
   ShieldAlert,
   ShieldPlus,
   Sparkles,
+  History,
 } from "lucide-react";
 import { useEnabledModules, moduleEnabled } from "../../lib/modules";
 
@@ -94,6 +95,7 @@ const adminSections: NavSection[] = [
       { to: "/admin/customers", label: "Customers & Credit", icon: HandCoins, moduleId: "CUSTOMERS" },
       { to: "/admin/categories", label: "Categories", icon: Tags, moduleId: "CATEGORIES" },
       { to: "/admin/users", label: "Users", icon: Users, moduleId: "USERS" },
+      { to: "/admin/audit", label: "Audit Trail", icon: History },
       { to: "/admin/settings", label: "Settings", icon: Settings, moduleId: "SETTINGS" },
       { to: "/admin/assistant", label: "AI Assistant", icon: Sparkles, moduleId: "AI_ASSISTANT" },
     ],
