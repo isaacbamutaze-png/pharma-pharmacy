@@ -19,6 +19,7 @@ import {
 } from "../../lib/payments/gateway";
 import { saveGatewayConfig } from "../../lib/payments/service";
 import { PaymentsServerCard } from "../../components/settings/PaymentsServerCard";
+import { BackupCard } from "../../components/settings/BackupCard";
 import {
   TIER_META,
   TIER_MODULES,
@@ -644,6 +645,8 @@ export function SettingsPage() {
             </div>
           )}
         </Card>
+
+        <BackupCard actorId={user?.id} />
 
         <PaymentsServerCard actorId={user?.id} />
 

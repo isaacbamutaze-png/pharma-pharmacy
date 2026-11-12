@@ -18,6 +18,7 @@ import type { ComponentType, ReactNode } from "react";
 import { useAuthStore, isAdmin } from "../../store/authStore";
 import { pharmaDb } from "../../db";
 import { todayISO, daysUntil } from "../../lib/stock";
+import { getLastBackupAt } from "../../lib/backup";
 
 export interface NavItem {
   to: string;
@@ -57,6 +58,9 @@ export function AppLayout({ sections, children, pageTitle }: AppLayoutProps) {
   const [profileOpen, setProfileOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const { user, logout } = useAuthStore();
+  const lastBackup = useLiveQuery(async () => (await getLastBackupAt()) ?? 0, []);
+  const backupStale =
+    lastBackup !== undefined && Date.now() - lastBackup > 7 * 86_400_000;
   const navigate = useNavigate();
 
   const medicines =
@@ -549,7 +553,25 @@ export function AppLayout({ sections, children, pageTitle }: AppLayoutProps) {
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto p-4 lg:p-6">{children}</main>
+        <main className="flex-1 overflow-y-auto p-4 lg:p-6">
+          {user?.weakPassword && (
+            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+              <strong>Security warning:</strong> this account still uses the default
+              password. {isAdmin(user) ? (
+                <>Change it now in <Link to="/admin/users" className="font-semibold underline">Users</Link>.</>
+              ) : (
+                <>Ask the administrator to set a new password.</>
+              )}
+            </div>
+          )}
+          {isAdmin(user) && backupStale && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              <strong>No recent backup.</strong> Your data lives only on this device.{" "}
+              <Link to="/admin/settings" className="font-semibold underline">Download a backup</Link>.
+            </div>
+          )}
+          {children}
+        </main>
       </div>
     </div>
   );

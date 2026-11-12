@@ -9,8 +9,11 @@ interface SessionUser {
   fullName: string;
   username: string;
   role: Role;
+  /** True when the account still uses a well-known default password. */
+  weakPassword?: boolean;
 }
 
+const DEFAULT_PASSWORDS = new Set(["admin123", "user123"]);
 const MAX_ATTEMPTS = 5;
 const LOCK_MS = 60_000;
 const ATTEMPTS_KEY = "pharma-login-attempts";
@@ -107,6 +110,7 @@ export const useAuthStore = create<AuthState>()(
             fullName: user.fullName,
             username: user.username,
             role: role.name,
+            weakPassword: DEFAULT_PASSWORDS.has(password),
           },
         });
       },

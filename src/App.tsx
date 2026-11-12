@@ -46,6 +46,7 @@ import { PrescriptionsPage } from "./pages/admin/Prescriptions";
 import { ControlledMedicinesPage } from "./pages/admin/ControlledMedicines";
 import { DrugSafetyPage } from "./pages/admin/DrugSafety";
 import { AiAssistantPage } from "./pages/admin/Assistant";
+import { AuditTrailPage } from "./pages/admin/AuditTrail";
 import { UserDashboard } from "./pages/user/Dashboard";
 import { UserMedicinesPage } from "./pages/user/Medicines";
 import { UserAlertsPage } from "./pages/user/Alerts";
@@ -192,6 +193,7 @@ function AppRoutes() {
         <Route path="categories" element={<CategoriesPage />} />
         <Route path="users" element={<UsersPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="audit" element={<AuditTrailPage />} />
         <Route
           path="patients"
           element={
